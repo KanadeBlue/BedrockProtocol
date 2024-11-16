@@ -17,101 +17,99 @@ namespace pocketmine\network\mcpe\protocol;
 use pocketmine\network\mcpe\protocol\serializer\PacketSerializer;
 use pocketmine\network\mcpe\protocol\types\login\JwtChain;
 use pocketmine\utils\BinaryStream;
-use function count;
-use function is_array;
-use function is_string;
 use function json_decode;
 use function json_encode;
-use function strlen;
+use function is_array;
+use function is_string;
 use const JSON_THROW_ON_ERROR;
 
-class LoginPacket extends DataPacket implements ServerboundPacket{
-	public const NETWORK_ID = ProtocolInfo::LOGIN_PACKET;
+class LoginPacket extends DataPacket implements ServerboundPacket {
+    public const NETWORK_ID = ProtocolInfo::LOGIN_PACKET;
 
-	public int $protocol;
-	public JwtChain $chainDataJwt;
-	public string $clientDataJwt;
+    public int $protocol;
+    public JwtChain $chainDataJwt;
+    public string $clientDataJwt;
 
-	/**
-	 * @generate-create-func
-	 */
-	public static function create(int $protocol, JwtChain $chainDataJwt, string $clientDataJwt) : self{
-		$result = new self;
-		$result->protocol = $protocol;
-		$result->chainDataJwt = $chainDataJwt;
-		$result->clientDataJwt = $clientDataJwt;
-		return $result;
-	}
+    /**
+     * Create a new LoginPacket instance.
+     */
+    public static function create(int $protocol, JwtChain $chainDataJwt, string $clientDataJwt): self {
+        $instance = new self;
+        $instance->protocol = $protocol;
+        $instance->chainDataJwt = $chainDataJwt;
+        $instance->clientDataJwt = $clientDataJwt;
+        return $instance;
+    }
 
-	public function canBeSentBeforeLogin() : bool{
-		return true;
-	}
+    public function canBeSentBeforeLogin(): bool {
+        return true;
+    }
 
-	protected function decodePayload(PacketSerializer $in) : void{
-		$this->protocol = $in->getInt();
-		$this->decodeConnectionRequest($in->getString());
-	}
+    protected function decodePayload(PacketSerializer $in): void {
+        $this->protocol = $in->getInt();
+        $this->decodeConnectionRequest($in->getString());
+    }
 
-	protected function decodeConnectionRequest(string $binary) : void{
-		$connRequestReader = new BinaryStream($binary);
+    private function decodeConnectionRequest(string $binary): void {
+        $connRequestReader = new BinaryStream($binary);
 
-		$chainDataJsonLength = $connRequestReader->getLInt();
-		if($chainDataJsonLength <= 0){
-			//technically this is always positive; the problem results because getLInt() is implicitly signed
-			//this is inconsistent with many other methods, but we can't do anything about that for now
-			throw new PacketDecodeException("Length of chain data JSON must be positive");
-		}
-		try{
-			$chainDataJson = json_decode($connRequestReader->get($chainDataJsonLength), associative: true, flags: JSON_THROW_ON_ERROR);
-		}catch(\JsonException $e){
-			throw new PacketDecodeException("Failed decoding chain data JSON: " . $e->getMessage());
-		}
-		if(!is_array($chainDataJson) || count($chainDataJson) !== 1 || !isset($chainDataJson["chain"])){
-			throw new PacketDecodeException("Chain data must be a JSON object containing only the 'chain' element");
-		}
-		if(!is_array($chainDataJson["chain"])){
-			throw new PacketDecodeException("Chain data 'chain' element must be a list of strings");
-		}
-		$jwts = [];
-		foreach($chainDataJson["chain"] as $jwt){
-			if(!is_string($jwt)){
-				throw new PacketDecodeException("Chain data 'chain' must contain only strings");
-			}
-			$jwts[] = $jwt;
-		}
-		//TODO: this pointless JwtChain model is here for BC - get rid of it next chance we get
-		$wrapper = new JwtChain;
-		$wrapper->chain = $jwts;
-		$this->chainDataJwt = $wrapper;
+        $this->chainDataJwt = $this->decodeJwtChain($connRequestReader);
 
-		$clientDataJwtLength = $connRequestReader->getLInt();
-		if($clientDataJwtLength <= 0){
-			//technically this is always positive; the problem results because getLInt() is implicitly signed
-			//this is inconsistent with many other methods, but we can't do anything about that for now
-			throw new PacketDecodeException("Length of clientData JWT must be positive");
-		}
-		$this->clientDataJwt = $connRequestReader->get($clientDataJwtLength);
-	}
+        $clientDataJwtLength = $connRequestReader->getLInt();
+        if ($clientDataJwtLength <= 0) {
+            throw new PacketDecodeException("Client data JWT length must be positive.");
+        }
+        $this->clientDataJwt = $connRequestReader->get($clientDataJwtLength);
+    }
 
-	protected function encodePayload(PacketSerializer $out) : void{
-		$out->putInt($this->protocol);
-		$out->putString($this->encodeConnectionRequest());
-	}
+    private function decodeJwtChain(BinaryStream $stream): JwtChain {
+        $chainDataLength = $stream->getLInt();
+        if ($chainDataLength <= 0) {
+            throw new PacketDecodeException("Chain data JSON length must be positive.");
+        }
 
-	protected function encodeConnectionRequest() : string{
-		$connRequestWriter = new BinaryStream();
+        try {
+            $chainDataJson = json_decode($stream->get($chainDataLength), true, flags: JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new PacketDecodeException("Failed to decode chain data JSON: " . $e->getMessage());
+        }
 
-		$chainDataJson = json_encode($this->chainDataJwt, JSON_THROW_ON_ERROR);
-		$connRequestWriter->putLInt(strlen($chainDataJson));
-		$connRequestWriter->put($chainDataJson);
+        if (!is_array($chainDataJson) || !isset($chainDataJson["chain"]) || !is_array($chainDataJson["chain"])) {
+            throw new PacketDecodeException("Invalid chain data structure.");
+        }
 
-		$connRequestWriter->putLInt(strlen($this->clientDataJwt));
-		$connRequestWriter->put($this->clientDataJwt);
+        $jwts = [];
+        foreach ($chainDataJson["chain"] as $jwt) {
+            if (!is_string($jwt)) {
+                throw new PacketDecodeException("Chain must contain only strings.");
+            }
+            $jwts[] = $jwt;
+        }
 
-		return $connRequestWriter->getBuffer();
-	}
+        $jwtChain = new JwtChain();
+        $jwtChain->chain = $jwts;
+        return $jwtChain;
+    }
 
-	public function handle(PacketHandlerInterface $handler) : bool{
-		return $handler->handleLogin($this);
-	}
+    protected function encodePayload(PacketSerializer $out): void {
+        $out->putInt($this->protocol);
+        $out->putString($this->encodeConnectionRequest());
+    }
+
+    private function encodeConnectionRequest(): string {
+        $connRequestWriter = new BinaryStream();
+
+        $chainDataJson = json_encode($this->chainDataJwt, JSON_THROW_ON_ERROR);
+        $connRequestWriter->putLInt(strlen($chainDataJson));
+        $connRequestWriter->put($chainDataJson);
+
+        $connRequestWriter->putLInt(strlen($this->clientDataJwt));
+        $connRequestWriter->put($this->clientDataJwt);
+
+        return $connRequestWriter->getBuffer();
+    }
+
+    public function handle(PacketHandlerInterface $handler): bool {
+        return $handler->handleLogin($this);
+    }
 }
